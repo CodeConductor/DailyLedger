@@ -1,5 +1,5 @@
 -- =============================================================================
--- RCC (Spun) Concrete Pipe Plant — Daily Production Register
+-- RCC (Spun) Concrete Pipe Plant — Daily Production Register (Daily Ledger)
 -- COMPLETE Supabase / Postgres schema (single file — no migrations needed)
 -- =============================================================================
 -- Run this ENTIRE file ONCE in the Supabase SQL Editor (Dashboard > SQL Editor).
@@ -8,17 +8,20 @@
 --
 -- Safe to re-run EXCEPT the seed section at the bottom (see RE-RUN NOTES).
 --
+-- PIPE MODEL
+--   A pipe is described by THREE independent attributes:
+--     * size_mm  — bore in millimetres (150, 200, ... 1000)
+--     * type     — S&S / Plain / FlushJoint   (editable list, see app_settings)
+--     * class    — NP3 / NP4                   (editable list, see app_settings)
+--   Each row in `pipes` is one full spec (e.g. 150mm / S&S / NP3). Production
+--   entries and the cement standard reference these attributes.
+--
 -- FREE-TIER NOTES
 --   * All tables store only small scalar values (numbers, short text, a small
 --     JSONB blob for optional raw materials). No files/blobs/attachments.
---   * Rough growth math (see README "Free-tier capacity"):
---       ~3 machines x ~15 sizes = ~45 production rows/day + ~6 fuel rows/day
---       => ~51 rows/day => ~18,600 rows/year at <1 KB/row => < 20 MB/year.
---     Many years fit inside the Supabase free 500 MB database.
---   * cement_standards + fuel_log_contractors grow very slowly (a few standard
---     edits ever; a handful of contractor tags per machine/day) — negligible.
---   * If you ever approach the limit, ARCHIVE old years to CSV then DELETE them
---     (see README) rather than upgrading to a paid plan.
+--   * ~51 rows/day => ~18,600 rows/year at <1 KB/row => < 20 MB/year. Many years
+--     fit inside the Supabase free 500 MB database. Archive old years to CSV then
+--     DELETE if you ever approach the limit (see README) — never a paid upgrade.
 --
 -- FORWARD-COMPATIBILITY
 --   Single tenant now, but every table carries org_id (defaulted to one fixed
@@ -52,21 +55,25 @@ create table if not exists public.machines (
 );
 
 -- =============================================================================
--- TABLE: pipe_sizes  (register rows: 150/3 ... 1000/3, PILLAR, F.J.)
+-- TABLE: pipes  (one full pipe spec = size + type + class)
+--   size_mm : bore in mm.  type/class : text values taken from the editable
+--   lists in app_settings (pipe_types / pipe_classes). Stored as text so that
+--   removing a value from a list can NEVER orphan an existing pipe row.
 -- =============================================================================
-create table if not exists public.pipe_sizes (
+create table if not exists public.pipes (
   id         uuid primary key default gen_random_uuid(),
   org_id     uuid not null default '00000000-0000-0000-0000-000000000001',
-  label      text not null,                       -- e.g. "150/3", "1000/3"
-  category   text not null default 'S&S',         -- "S&S" | "PILLAR" | "F.J."
-  sort_order int  not null default 0,             -- display order in grid
-  active     boolean not null default true,
-  created_at timestamptz not null default now()
+  size_mm    integer not null check (size_mm > 0),
+  type       text    not null,                    -- "S&S" | "Plain" | "FlushJoint" | ...
+  class      text    not null,                    -- "NP3" | "NP4" | ...
+  active     boolean not null default true,       -- archived = false (soft)
+  created_at timestamptz not null default now(),
+  unique (org_id, size_mm, type, class)
 );
 
 -- =============================================================================
 -- TABLE: contractors  (crews/persons who made a batch — NOT permanent staff)
---   Names change over time and float across machines & sizes.
+--   Names change over time and float across machines & pipes.
 --   NEVER hard-delete; deactivate instead so historical reports keep the name.
 -- =============================================================================
 create table if not exists public.contractors (
@@ -79,15 +86,15 @@ create table if not exists public.contractors (
 
 -- =============================================================================
 -- TABLE: production_entries  (one cell of the daily grid)
---   machine_id, pipe_size_id, contractor_id are all INDEPENDENT.
---   A contractor may appear many times in one day across machine/size combos.
+--   machine_id, pipe_id, contractor_id are all INDEPENDENT.
+--   A contractor may appear many times in one day across machine/pipe combos.
 -- =============================================================================
 create table if not exists public.production_entries (
   id            uuid primary key default gen_random_uuid(),
   org_id        uuid not null default '00000000-0000-0000-0000-000000000001',
   date          date not null,
   machine_id    uuid not null references public.machines(id),
-  pipe_size_id  uuid not null references public.pipe_sizes(id),
+  pipe_id       uuid not null references public.pipes(id),
   contractor_id uuid not null references public.contractors(id),
   good_qty      integer not null default 0 check (good_qty   >= 0),
   reject_qty    integer not null default 0 check (reject_qty >= 0),
@@ -99,7 +106,7 @@ create table if not exists public.production_entries (
 
 create index if not exists idx_prod_date           on public.production_entries (date);
 create index if not exists idx_prod_contractor_date on public.production_entries (contractor_id, date);
-create index if not exists idx_prod_size_date       on public.production_entries (pipe_size_id, date);
+create index if not exists idx_prod_pipe_date       on public.production_entries (pipe_id, date);
 create index if not exists idx_prod_machine_date    on public.production_entries (machine_id, date);
 
 -- =============================================================================
@@ -127,22 +134,24 @@ create index if not exists idx_fuel_machine_date on public.fuel_logs (machine_id
 
 -- =============================================================================
 -- TABLE: cement_standards  (plant's own bags-per-pipe standard, effective-dated)
---   Editing the standard INSERTS a new row with a later effective_date rather
---   than updating in place, so a report for a past day always uses the standard
---   that was effective on that day. bags_per_pipe defaults to 0 — the plant's
---   QC/mix-design staff enter their own figure. NOTHING is hardcoded here.
+--   Defined per SIZE + CLASS (type is ignored — cement usage depends mainly on
+--   bore & strength class). Editing INSERTS a new row with a later effective_date
+--   rather than updating in place, so a report for a past day always uses the
+--   standard that was effective on that day. bags_per_pipe defaults to 0 — the
+--   plant's QC/mix-design staff enter their own figure. NOTHING is hardcoded.
 -- =============================================================================
 create table if not exists public.cement_standards (
   id             uuid primary key default gen_random_uuid(),
   org_id         uuid not null default '00000000-0000-0000-0000-000000000001',
-  pipe_size_id   uuid not null references public.pipe_sizes(id),
+  size_mm        integer not null,
+  class          text    not null,
   bags_per_pipe  numeric(10,4) not null default 0 check (bags_per_pipe >= 0),
   effective_date date not null default current_date,
   created_at     timestamptz not null default now()
 );
 
-create index if not exists idx_cement_std_size_date
-  on public.cement_standards (pipe_size_id, effective_date desc);
+create index if not exists idx_cement_std_sizeclass_date
+  on public.cement_standards (size_mm, class, effective_date desc);
 
 -- =============================================================================
 -- TABLE: fuel_log_contractors  (many-to-many)
@@ -163,7 +172,10 @@ create index if not exists idx_flc_fuel       on public.fuel_log_contractors (fu
 create index if not exists idx_flc_contractor on public.fuel_log_contractors (contractor_id);
 
 -- =============================================================================
--- TABLE: app_settings  (single-row config, e.g. which raw-material fields show)
+-- TABLE: app_settings  (single-row config)
+--   * raw_material_fields — which optional numeric fields show in the entry form
+--   * pipe_types / pipe_classes — editable lists that populate the Type/Class
+--     dropdowns when adding a pipe (see the pipes table).
 -- =============================================================================
 create table if not exists public.app_settings (
   org_id            uuid primary key default '00000000-0000-0000-0000-000000000001',
@@ -175,12 +187,21 @@ create table if not exists public.app_settings (
       {"key":"dust","label_en":"Dust","label_hi":"डस्ट","enabled":true},
       {"key":"450_2","label_en":"450/2","label_hi":"450/2","enabled":false},
       {"key":"1000_3","label_en":"1000/3","label_hi":"1000/3","enabled":false}]'::jsonb,
+  pipe_types        jsonb not null default '["S&S","Plain","FlushJoint"]'::jsonb,
+  pipe_classes      jsonb not null default '["NP3","NP4"]'::jsonb,
   updated_at        timestamptz not null default now()
 );
 
 insert into public.app_settings (org_id)
 values ('00000000-0000-0000-0000-000000000001')
 on conflict (org_id) do nothing;
+
+-- If app_settings already existed from an earlier version, make sure the new
+-- pipe list columns are present (harmless if they already are).
+alter table public.app_settings
+  add column if not exists pipe_types   jsonb not null default '["S&S","Plain","FlushJoint"]'::jsonb;
+alter table public.app_settings
+  add column if not exists pipe_classes jsonb not null default '["NP3","NP4"]'::jsonb;
 
 -- =============================================================================
 -- updated_at triggers (keep updated_at fresh on edits)
@@ -208,7 +229,7 @@ create trigger trg_fuel_updated before update on public.fuel_logs
 --   without touching table shapes or the app queries.
 -- =============================================================================
 alter table public.machines             enable row level security;
-alter table public.pipe_sizes           enable row level security;
+alter table public.pipes                enable row level security;
 alter table public.contractors          enable row level security;
 alter table public.production_entries   enable row level security;
 alter table public.fuel_logs            enable row level security;
@@ -220,7 +241,7 @@ do $$
 declare t text;
 begin
   foreach t in array array[
-    'machines','pipe_sizes','contractors',
+    'machines','pipes','contractors',
     'production_entries','fuel_logs',
     'cement_standards','fuel_log_contractors',
     'app_settings'
@@ -246,23 +267,13 @@ $$;
 insert into public.machines (name) values ('Machine 1'), ('Machine 2'), ('Machine 3')
 on conflict do nothing;
 
--- Pipe sizes (typical spun-pipe register rows). category: S&S / PILLAR / F.J.
-insert into public.pipe_sizes (label, category, sort_order) values
-  ('150/3',  'S&S', 10),
-  ('200/3',  'S&S', 20),
-  ('250/3',  'S&S', 30),
-  ('300/3',  'S&S', 40),
-  ('350/3',  'S&S', 50),
-  ('400/3',  'S&S', 60),
-  ('450/3',  'S&S', 70),
-  ('500/3',  'S&S', 80),
-  ('600/3',  'S&S', 90),
-  ('700/3',  'S&S', 100),
-  ('800/3',  'S&S', 110),
-  ('900/3',  'S&S', 120),
-  ('1000/3', 'S&S', 130),
-  ('PILLAR', 'PILLAR', 140),
-  ('F.J.',   'F.J.', 150)
+-- A few example pipes (size_mm / type / class). Add the rest in Settings.
+insert into public.pipes (size_mm, type, class) values
+  (150,  'S&S',   'NP3'),
+  (150,  'S&S',   'NP4'),
+  (200,  'S&S',   'NP3'),
+  (300,  'Plain', 'NP3'),
+  (600,  'S&S',   'NP4')
 on conflict do nothing;
 
 -- A couple of starter contractors (names are illustrative; edit in Settings)
@@ -270,12 +281,14 @@ insert into public.contractors (name) values ('राम कुमार'), ('�
 on conflict do nothing;
 
 -- Baseline 0-bag cement standard (effective 2000-01-01, so it covers ALL past
--- dates) for every pipe_size that has none yet. Enter real values in Settings.
-insert into public.cement_standards (pipe_size_id, bags_per_pipe, effective_date)
-select ps.id, 0, date '2000-01-01'
-from public.pipe_sizes ps
+-- dates) for every distinct (size_mm, class) present in pipes. Enter real values
+-- in Settings.
+insert into public.cement_standards (size_mm, class, bags_per_pipe, effective_date)
+select distinct p.size_mm, p.class, 0, date '2000-01-01'
+from public.pipes p
 where not exists (
-  select 1 from public.cement_standards cs where cs.pipe_size_id = ps.id
+  select 1 from public.cement_standards cs
+  where cs.size_mm = p.size_mm and cs.class = p.class
 );
 
 -- =============================================================================
@@ -283,9 +296,10 @@ where not exists (
 --   * Everything ABOVE the SEED DATA section is safe to re-run: tables/indexes
 --     use "if not exists", the enum is guarded by a DO block, policies are
 --     dropped before create, and app_settings uses ON CONFLICT.
---   * The cement_standards baseline insert is guarded by "where not exists", so
---     it is also safe to re-run.
---   * The machines / pipe_sizes / contractors seeds have NO unique constraint on
---     name, so re-running WILL create duplicates. Run the SEED section only once,
---     or clear those tables first.
+--   * The pipes seed uses "on conflict do nothing" against the unique
+--     (org_id,size_mm,type,class), and the cement_standards baseline is guarded
+--     by "where not exists" — both are safe to re-run.
+--   * The machines / contractors seeds have NO unique constraint on name, so
+--     re-running WILL create duplicates. Run the SEED section only once, or clear
+--     those tables first.
 -- =============================================================================
