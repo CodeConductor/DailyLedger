@@ -24,12 +24,13 @@ This is the digital version of the paper register page for one day.
 
 ### Step 2 — Production · उत्पादन
 Build the grid one row at a time:
-- **+ Row** adds a blank row. Pick **Pipe Size**, **Machine**, **Contractor**,
-  then type **Good** and **Reject** quantities.
-- **+ All sizes** quickly adds one row for every size on the first selected
+- **+ Row** adds a blank row. Pick **Pipe** (shown as *Size · Type · Class*, e.g.
+  `150mm S&S NP3`), **Machine**, **Contractor**, then type **Good** and **Reject**
+  quantities.
+- **+ All pipes** quickly adds one row for every pipe on the first selected
   machine (like filling a whole column of the paper sheet) — then just fill the
   numbers and set the contractor per row.
-- The **same contractor can appear on many rows** (different sizes/machines) —
+- The **same contractor can appear on many rows** (different pipes/machines) —
   that's expected.
 - **Raw materials · कच्चा माल** (optional): tap the small ▶ under a row to open
   Cutting Oil / 20mm / 10mm / Jeera / Dust etc. Leave blank if not used.
@@ -87,11 +88,16 @@ many contractors worked in the range.
 
 - **Machines:** add, rename, or archive a machine. Archived machines stop
   appearing in the entry form but old reports keep them.
-- **Pipe Sizes:** add a new size (with category S&S / PILLAR / F.J.), rename, or
-  archive.
+- **Pipe Type & Class lists:** add or remove the values that appear in the Type
+  (S&S / Plain / FlushJoint) and Class (NP3 / NP4) dropdowns, then **Save**.
+- **Pipes:** add a pipe by choosing **Size (mm) + Type + Class**. Archive pipes
+  you no longer run (kept for old reports), or **Delete** one that has never been
+  used. (If a pipe is already in production entries, delete is blocked — archive
+  it instead.)
 - **Cement Standard · सीमेंट मानक:** enter **your plant's own** cement bags per
-  pipe for each size (from your QC / mix-design staff — there is no universal
-  number). Set **"New values effective from"** to the date the standard applies,
+  pipe for each **Size + Class** (from your QC / mix-design staff — there is no
+  universal number; Type is not used here). Set **"New values effective from"** to
+  the date the standard applies,
   type the new value(s), and press **Save**. Changing a standard later does
   **not** alter past reports — they keep the value that was effective on their
   own date.
@@ -106,7 +112,7 @@ many contractors worked in the range.
 ## 4. Cement reconciliation · सीमेंट मिलान
 
 **One-time / occasional setup:** in **Settings → Cement Standard**, enter bags of
-cement per pipe for each size.
+cement per pipe for each Size + Class.
 
 **Every day, in Daily Entry:** in the **Fuel** section, besides entering cement
 Opening/Consumed/Closing per machine, use **"Contractors operating this machine

@@ -16,9 +16,10 @@ daily production register**. This app digitizes that register.
 
 The paper register, per day, has three parts:
 
-1. **Production table** — rows are pipe sizes/categories (`150/3`, `200/3`, …
-   `1000/3`, plus `PILLAR`, `F.J.`), columns are machines. Each filled cell also
-   names the **contractor** (a crew/person, written in Hindi) who made that batch.
+1. **Production table** — rows are pipes, columns are machines. In the app a pipe
+   is modelled as three attributes: **Size** (mm, e.g. 150), **Type** (S&S /
+   Plain / FlushJoint) and **Class** (NP3 / NP4). Each filled cell also names the
+   **contractor** (a crew/person, written in Hindi) who made that batch.
 2. **Raw materials** per size — optional numbers (Cutting Oil, 20mm, 10mm, Jeera,
    Dust, …).
 3. **Fuel/consumables** per machine per day — Opening / Consumed / Closing for
@@ -109,7 +110,7 @@ digitalLedger/
 │   ├── lib/
 │   │   ├── supabaseClient.js # creates the client; exports `supabase`, `isConfigured`
 │   │   ├── useMasters.js     # hook: load machines/sizes/contractors/app_settings
-│   │   ├── constants.js      # DEFAULT_ORG_ID, FUEL_TYPES, CATEGORIES, tag helper
+│   │   ├── constants.js      # DEFAULT_ORG_ID, FUEL_TYPES, pipeLabel/typeTagClass
 │   │   ├── dates.js          # ISO date helpers + range presets (timezone-safe)
 │   │   ├── fetchAll.js       # paginated range fetch (>1000 rows safe)
 │   │   ├── csv.js            # dependency-free CSV builder + browser download
@@ -149,11 +150,11 @@ apply the change to your Supabase project.
 | Table | Key columns | Notes |
 |---|---|---|
 | `machines` | `id, org_id, name, active` | `active=false` = archived (soft delete). |
-| `pipe_sizes` | `id, label, category, sort_order, active` | `category` ∈ `S&S`/`PILLAR`/`F.J.`; `sort_order` controls grid order. |
+| `pipes` | `id, size_mm, type, class, active` | One full pipe spec. `type`/`class` are text from the editable lists in `app_settings`; `unique(org_id,size_mm,type,class)`. |
 | `contractors` | `id, name, active, created_at` | **Never hard-deleted** — only `active=false`. Devanagari names. |
-| `production_entries` | `date, machine_id, pipe_size_id, contractor_id, good_qty, reject_qty, raw_materials(jsonb)` | One grid cell. All three FKs **independent**. `raw_materials` is optional JSONB. |
+| `production_entries` | `date, machine_id, pipe_id, contractor_id, good_qty, reject_qty, raw_materials(jsonb)` | One grid cell. All three FKs **independent**. `raw_materials` is optional JSONB. |
 | `fuel_logs` | `date, machine_id, fuel_type, opening, consumed, closing` | `fuel_type` is enum `('cement','diesel')`. **`unique(org_id,date,machine_id,fuel_type)`** enables upsert-on-edit. |
-| `cement_standards` | `pipe_size_id, bags_per_pipe, effective_date` | **Effective-dated** standard (see §6.3). Editing = insert new row. |
+| `cement_standards` | `size_mm, class, bags_per_pipe, effective_date` | **Effective-dated** standard per Size + Class (see §6.3). Editing = insert new row. |
 | `fuel_log_contractors` | `fuel_log_id, contractor_id` | Many-to-many tag: who operated a machine when its cement was drawn. `ON DELETE CASCADE`. |
 | `app_settings` | `org_id, raw_material_fields(jsonb)` | Single row. Which optional raw-material fields show in the entry form. |
 
@@ -167,7 +168,7 @@ apply the change to your Supabase project.
 - **Soft delete / archive, never hard delete** for masters, so old reports keep
   the exact name/label that was in use.
 - **Indexes** on `production_entries` cover the report access patterns:
-  `(date)`, `(contractor_id,date)`, `(pipe_size_id,date)`, `(machine_id,date)`.
+  `(date)`, `(contractor_id,date)`, `(pipe_id,date)`, `(machine_id,date)`.
 - **`updated_at` triggers** on `production_entries` and `fuel_logs`.
 - **RLS**: every table has RLS enabled and a single policy created in a `DO`
   loop — `for all to authenticated using (true) with check (true)`. See §7.
@@ -213,19 +214,22 @@ Other entry-form details:
 
 ### 6.3 Effective-dated cement standards (`cementStandards.js`)
 The plant's "bags per pipe" changes over time, and **changing it must not rewrite
-past reports.** So instead of a single editable value per size, we store a
-**history**: each edit inserts a new `cement_standards` row with an
-`effective_date`.
+past reports.** So instead of a single editable value, we store a **history**:
+each edit inserts a new `cement_standards` row with an `effective_date`. The
+standard is keyed on **Size + Class** (Type is ignored — cement usage depends on
+bore and strength class).
 
-`buildStandardResolver(rows)` returns a function `resolve(pipeSizeId, dateISO)`
-that picks the row with the **latest `effective_date ≤ dateISO`**. A report for
-1 March uses the standard that was effective on 1 March, even if it was changed
-in April. The schema seeds a baseline `0` effective `2000-01-01` so every size
-has a defined value for all of history until real numbers are entered.
+`buildStandardResolver(rows)` returns a function `resolve(sizeMm, klass, dateISO)`
+that picks the row with the **latest `effective_date ≤ dateISO`** for that
+size+class. A report for 1 March uses the standard that was effective on 1 March,
+even if it was changed in April. The schema seeds a baseline `0` effective
+`2000-01-01` so every size+class in `pipes` has a defined value for all of history
+until real numbers are entered.
 
-The Settings UI (`CementStandardSettings`) shows the currently-effective value,
-lets you type new values and pick an "effective from" date, and **only inserts
-rows for sizes that actually changed.**
+The Settings UI (`CementStandardSettings`) lists the **distinct (size, class)**
+combinations from active pipes, shows the currently-effective value, lets you type
+new values and pick an "effective from" date, and **only inserts rows for combos
+that actually changed.**
 
 ### 6.4 Contractor tagging on cement draws
 Reconciliation needs to associate cement with people. Cement is logged per
@@ -238,8 +242,8 @@ cement row yet, `save()` force-creates a zero cement row so the tags have a targ
 For the selected range (+ optional machine/contractor filters):
 
 - **Expected cement** = Σ over matching `production_entries` of
-  `good_qty × resolve(pipe_size_id, entry.date)`. (Uses **good_qty only**, per
-  the spec.)
+  `good_qty × resolve(pipe.size_mm, pipe.class, entry.date)` (the pipe's size and
+  class come from the `pMeta` map). (Uses **good_qty only**, per the spec.)
 - **Actual cement** = Σ `consumed` of matching **cement** `fuel_logs`. With a
   contractor filter, only cement logs **tagged** with that contractor count.
 - **Difference** = actual − expected, shown as a plain number — **no
@@ -373,10 +377,11 @@ upgrade to a paid plan** — instead:
 |---|---|
 | **RCC / spun pipe** | Reinforced Cement Concrete pipe made by spinning; the plant's product. |
 | **Contractor** | A crew/person who makes batches (paid per piece). Not permanent staff; names change; floats across machines/sizes. |
-| **S&S / PILLAR / F.J.** | Pipe-size categories used in the register (S&S = socket & spigot; F.J. = flush joint). |
+| **Type (S&S / Plain / FlushJoint)** | The pipe joint/type. S&S = socket & spigot; FlushJoint = flush joint. Editable list in Settings. |
+| **Class (NP3 / NP4)** | Pipe strength class per IS 458 terminology. Editable list in Settings. |
 | **Good / Reject qty** | Pipes that passed / failed for a size+machine+contractor on a day. |
 | **Cement (सीमेंट) / Diesel (डीजल)** | The two consumables tracked per machine/day via opening/consumed/closing. |
-| **Bags per pipe** | The plant's own cement standard per size; entered by QC/mix-design staff, effective-dated. |
+| **Bags per pipe** | The plant's own cement standard per Size + Class; entered by QC/mix-design staff, effective-dated. |
 | **Reconciliation** | Comparing cement actually drawn vs. cement expected for the pipes actually produced. |
 | **org_id** | Fixed single-tenant id today; the hook for future multi-company support. |
 

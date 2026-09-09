@@ -13,6 +13,9 @@ a shop-floor supervisor on a tablet/computer.
 > 1. **README.md** (this file) — what it is, how it's built.
 > 2. **[SETUP.md](./SETUP.md)** — get it running on a fresh machine (step by step).
 > 3. **[USAGE.md](./USAGE.md)** — how the supervisor uses it every day.
+> 4. **[DEVELOPER_GUIDE.md](./DEVELOPER_GUIDE.md)** — full deep-dive for anyone who
+>    will maintain or extend the code (architecture, data model, key logic, how to
+>    extend). **Start here if you're taking over development.**
 
 ---
 
@@ -22,9 +25,9 @@ a shop-floor supervisor on a tablet/computer.
 - Pick the date (defaults to today).
 - Choose which **machines** ran that day.
 - Add **contractors** working that day inline (names change often — quick add).
-- A **production grid**: each row = *Pipe Size + Machine + Contractor + Good Qty
-  + Reject Qty*. A contractor can appear many times across different
-  size/machine combinations in the same day (they "float").
+- A **production grid**: each row = *Pipe (Size · Type · Class) + Machine +
+  Contractor + Good Qty + Reject Qty*. A contractor can appear many times across
+  different pipe/machine combinations in the same day (they "float").
 - Optional, collapsed **raw-materials** section per row (Cutting Oil, 20mm, 10mm,
   Jeera, Dust, …) — which fields show is configurable in Settings.
 - A **fuel log per machine** (not per contractor): Opening / Consumed / Closing
@@ -36,9 +39,9 @@ a shop-floor supervisor on a tablet/computer.
 
 ### 2. Dashboard / reports
 - Range filter: Today / This Week / This Month / Custom.
-- **Production:** total by size (bar), trend over time (line), reject rate % by
-  size and by machine.
-- **Contractors:** pieces per contractor (pay-by-piece) with per-size detail,
+- **Production:** total by pipe (bar), trend over time (line), reject rate % by
+  pipe and by machine.
+- **Contractors:** pieces per contractor (pay-by-piece) with per-pipe detail,
   reject rate with **above-average flagging**, days worked, and a per-contractor
   detail view.
 - **Fuel:** diesel & cement consumption trend over time.
@@ -48,18 +51,20 @@ a shop-floor supervisor on a tablet/computer.
 
 ### 3. Settings
 - Manage **machines** (add / rename / archive).
-- Manage **pipe sizes / categories** (add / rename / archive; category S&S /
-  PILLAR / F.J.).
+- Manage the editable **Type** (S&S / Plain / FlushJoint) and **Class**
+  (NP3 / NP4) lists.
+- Manage **pipes** — add a full spec (Size mm + Type + Class), archive, or delete
+  an unused one.
 - Manage **contractors** (add / rename / deactivate — **never hard-deleted**, so
   old reports keep the name).
 - Toggle which **raw-material fields** are tracked in the entry form.
-- **Cement standard** — your plant's own bags-per-pipe figure for each size,
+- **Cement standard** — your plant's own bags-per-pipe figure per Size + Class,
   used by the reconciliation report (below).
 
 ### 4. Cement-yield reconciliation
 - **Cement standard table** (Settings): bags of cement required per pipe, per
-  size. **Blank/0 by default** — you enter your own mix-design figure; nothing is
-  hardcoded from any external standard. Every edit is stored with an
+  **Size + Class**. **Blank/0 by default** — you enter your own mix-design figure;
+  nothing is hardcoded from any external standard. Every edit is stored with an
   **effective_date**, so changing the standard never rewrites past reports.
 - **Contractor tagging on cement draws** (Entry Form): under each machine's fuel
   section you tag which contractor(s) operated that machine when its cement was
@@ -92,8 +97,9 @@ digitalLedger/
 │   │   └── Toast.jsx          # tiny toast notifications
 │   ├── lib/
 │   │   ├── supabaseClient.js  # Supabase client + config guard
-│   │   ├── useMasters.js      # loads machines/sizes/contractors/settings
-│   │   ├── constants.js       # org id, fuel types, categories
+│   │   ├── useMasters.js      # loads machines/pipes/contractors/settings
+│   │   ├── constants.js       # org id, fuel types, pipe label + tag helpers
+│   │   ├── cementStandards.js # effective-dated standard resolver (size+class)
 │   │   ├── dates.js           # ISO date helpers, range presets
 │   │   ├── fetchAll.js        # paginated range fetch (>1000 rows safe)
 │   │   └── csv.js             # dependency-free CSV export
@@ -115,21 +121,24 @@ Full DDL is in [`supabase/schema.sql`](./supabase/schema.sql). Summary:
 | Table                | Purpose |
 |----------------------|---------|
 | `machines`           | Production lines. `active` for soft-archive. |
-| `pipe_sizes`         | Register rows (150/3 … 1000/3, PILLAR, F.J.). `category`, `sort_order`, `active`. |
+| `pipes`              | One full pipe spec: `size_mm` + `type` + `class` + `active`. Type/Class values come from editable lists in `app_settings`. |
 | `contractors`        | Crews/persons. `name` editable, `active` (never deleted). Devanagari names. |
-| `production_entries` | One grid cell: `date, machine_id, pipe_size_id, contractor_id, good_qty, reject_qty, raw_materials jsonb`. |
+| `production_entries` | One grid cell: `date, machine_id, pipe_id, contractor_id, good_qty, reject_qty, raw_materials jsonb`. |
 | `fuel_logs`          | Per machine/day/fuel: `opening, consumed, closing`; enum `fuel_type ('cement','diesel')`. |
-| `app_settings`       | Single row: which raw-material fields are tracked. |
-| `cement_standards`   | `pipe_size_id, bags_per_pipe, effective_date` — versioned bags-per-pipe standard; edits add a new effective-dated row. |
+| `app_settings`       | Single row: tracked raw-material fields + editable `pipe_types` / `pipe_classes` lists. |
+| `cement_standards`   | `size_mm, class, bags_per_pipe, effective_date` — versioned bags-per-pipe standard (per Size + Class); edits add a new effective-dated row. |
 | `fuel_log_contractors` | Many-to-many `fuel_log_id ↔ contractor_id` — who operated a machine when its cement was drawn. |
 
 > Everything is in the **single** [`supabase/schema.sql`](./supabase/schema.sql) —
 > run it once and the whole app (including cement reconciliation) is ready. No
 > separate migration step.
 
-- All three of `machine_id`, `pipe_size_id`, `contractor_id` are **independent**
-  FKs on `production_entries`.
-- Indexes: `(date)`, `(contractor_id, date)`, plus `(pipe_size_id, date)` and
+- A **pipe** = Size (mm) + Type (S&S/Plain/FlushJoint) + Class (NP3/NP4). The
+  Type/Class option lists are editable in Settings; each `pipes` row stores the
+  chosen text, so removing a list value never orphans an existing pipe.
+- All three of `machine_id`, `pipe_id`, `contractor_id` are **independent** FKs on
+  `production_entries`.
+- Indexes: `(date)`, `(contractor_id, date)`, plus `(pipe_id, date)` and
   `(machine_id, date)` for report performance.
 - **Row Level Security** is on. v1 policy: any authenticated user may read/write.
   Every table also carries an `org_id` (defaulted to one fixed org) so a real
