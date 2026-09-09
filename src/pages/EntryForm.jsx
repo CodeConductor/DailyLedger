@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import { useMasters } from '../lib/useMasters'
 import { useToast } from '../components/Toast'
-import { DEFAULT_ORG_ID, FUEL_TYPES, categoryTagClass } from '../lib/constants'
+import { DEFAULT_ORG_ID, FUEL_TYPES, pipeLabel, typeTagClass } from '../lib/constants'
 import { todayISO } from '../lib/dates'
 
 // A stable client-side key generator for row identity (no Date.now/random needed).
@@ -24,7 +24,7 @@ export default function EntryForm() {
   const toast = useToast()
   // Load ALL masters (incl. archived) so old days keep their labels; we filter
   // to active when offering new choices.
-  const { machines, sizes, contractors, settings, loading: mLoading, reload } =
+  const { machines, pipes, contractors, settings, loading: mLoading, reload } =
     useMasters({ activeOnly: false })
 
   const [date, setDate] = useState(todayISO())
@@ -65,7 +65,7 @@ export default function EntryForm() {
         peData.map((r) => ({
           key: nextKey(),
           id: r.id,
-          pipe_size_id: r.pipe_size_id,
+          pipe_id: r.pipe_id,
           machine_id: r.machine_id,
           contractor_id: r.contractor_id,
           good_qty: String(r.good_qty ?? 0),
@@ -156,7 +156,7 @@ export default function EntryForm() {
       ...prev,
       {
         key: nextKey(),
-        pipe_size_id: prefill.pipe_size_id || '',
+        pipe_id: prefill.pipe_id || '',
         machine_id: prefill.machine_id || dayMachines[0] || '',
         contractor_id: prefill.contractor_id || '',
         good_qty: '0',
@@ -167,16 +167,16 @@ export default function EntryForm() {
     ])
   }
 
-  // Convenience: add one row for every active size on the first day-machine —
+  // Convenience: add one row for every active pipe on the first day-machine —
   // mirrors filling a column of the paper register quickly.
-  function addAllSizes() {
+  function addAllPipes() {
     const machine = dayMachines[0] || ''
-    const activeSizes = sizes.filter((s) => s.active)
+    const activePipes = pipes.filter((p) => p.active)
     setRows((prev) => [
       ...prev,
-      ...activeSizes.map((s) => ({
+      ...activePipes.map((p) => ({
         key: nextKey(),
-        pipe_size_id: s.id,
+        pipe_id: p.id,
         machine_id: machine,
         contractor_id: '',
         good_qty: '0',
@@ -254,8 +254,8 @@ export default function EntryForm() {
     const warns = []
     rows.forEach((r, i) => {
       const label = `Row ${i + 1}`
-      if (!r.pipe_size_id || !r.machine_id || !r.contractor_id) {
-        errs.push(`${label}: pick size, machine and contractor.`)
+      if (!r.pipe_id || !r.machine_id || !r.contractor_id) {
+        errs.push(`${label}: pick pipe, machine and contractor.`)
       }
       const g = Number(r.good_qty)
       const rj = Number(r.reject_qty)
@@ -298,7 +298,7 @@ export default function EntryForm() {
       if (del.error) throw del.error
 
       const toInsert = rows
-        .filter((r) => r.pipe_size_id && r.machine_id && r.contractor_id)
+        .filter((r) => r.pipe_id && r.machine_id && r.contractor_id)
         .map((r) => {
           // keep only non-empty raw material numbers
           const rm = {}
@@ -311,7 +311,7 @@ export default function EntryForm() {
             org_id: DEFAULT_ORG_ID,
             date,
             machine_id: r.machine_id,
-            pipe_size_id: r.pipe_size_id,
+            pipe_id: r.pipe_id,
             contractor_id: r.contractor_id,
             good_qty: Number(r.good_qty) || 0,
             reject_qty: Number(r.reject_qty) || 0,
@@ -462,14 +462,14 @@ export default function EntryForm() {
           Production · उत्पादन
           <span className="spacer" />
           <button type="button" className="btn sm" onClick={() => addRow()}>+ Row</button>
-          <button type="button" className="btn sm ghost" onClick={addAllSizes} disabled={!dayMachines.length}>
-            + All sizes
+          <button type="button" className="btn sm ghost" onClick={addAllPipes} disabled={!dayMachines.length}>
+            + All pipes
           </button>
         </div>
         <div className="panel-body">
           {rows.length === 0 && (
             <div className="empty">
-              No production rows yet. Use <strong>+ Row</strong> or <strong>+ All sizes</strong> to begin.
+              No production rows yet. Use <strong>+ Row</strong> or <strong>+ All pipes</strong> to begin.
             </div>
           )}
           {rows.length > 0 && (
@@ -477,7 +477,7 @@ export default function EntryForm() {
               <table className="register">
                 <thead>
                   <tr>
-                    <th style={{ minWidth: 130 }}>Pipe Size</th>
+                    <th style={{ minWidth: 180 }}>Pipe (Size · Type · Class)</th>
                     <th style={{ minWidth: 120 }}>Machine</th>
                     <th style={{ minWidth: 160 }}>Contractor · ठेकेदार</th>
                     <th className="num" style={{ minWidth: 80 }}>Good</th>
@@ -487,13 +487,13 @@ export default function EntryForm() {
                 </thead>
                 <tbody>
                   {rows.map((r) => {
-                    const size = sizes.find((s) => s.id === r.pipe_size_id)
+                    const pipe = pipes.find((p) => p.id === r.pipe_id)
                     return (
                       <RowEditor
                         key={r.key}
                         row={r}
-                        size={size}
-                        sizes={sizes}
+                        pipe={pipe}
+                        pipes={pipes}
                         machines={machines}
                         contractors={contractors}
                         enabledRM={enabledRM}
@@ -595,18 +595,23 @@ export default function EntryForm() {
 }
 
 // ---- one production row (with expandable raw materials) --------------------
-function RowEditor({ row, size, sizes, machines, contractors, enabledRM, onChange, onRemove, onRM }) {
+function RowEditor({ row, pipe, pipes, machines, contractors, enabledRM, onChange, onRemove, onRM }) {
   return (
     <>
       <tr>
         <td>
-          <select value={row.pipe_size_id} onChange={(e) => onChange({ pipe_size_id: e.target.value })}>
-            <option value="">— size —</option>
-            {optionsFor(sizes, row.pipe_size_id).map((s) => (
-              <option key={s.id} value={s.id}>{s.label}{!s.active ? ' (archived)' : ''}</option>
+          <select value={row.pipe_id} onChange={(e) => onChange({ pipe_id: e.target.value })}>
+            <option value="">— pipe —</option>
+            {optionsFor(pipes, row.pipe_id).map((p) => (
+              <option key={p.id} value={p.id}>{pipeLabel(p)}{!p.active ? ' (archived)' : ''}</option>
             ))}
           </select>
-          {size && <span className={categoryTagClass(size.category)} style={{ marginTop: 4, display: 'inline-block' }}>{size.category}</span>}
+          {pipe && (
+            <span style={{ marginTop: 4, display: 'inline-flex', gap: 4 }}>
+              <span className={typeTagClass(pipe.type)}>{pipe.type}</span>
+              <span className="tag">{pipe.class}</span>
+            </span>
+          )}
         </td>
         <td>
           <select value={row.machine_id} onChange={(e) => onChange({ machine_id: e.target.value })}>

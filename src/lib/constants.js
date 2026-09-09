@@ -10,11 +10,21 @@ export const FUEL_TYPES = [
   { key: 'diesel', label_en: 'Diesel', label_hi: 'डीजल' },
 ]
 
-// Pipe-size categories (badge colours in CSS: .tag / .tag.pillar / .tag.fj).
-export const CATEGORIES = ['S&S', 'PILLAR', 'F.J.']
+// Fallback Type/Class lists — only used if app_settings has none. The live
+// lists are stored in app_settings (pipe_types / pipe_classes) and edited in
+// Settings, so these are just safe defaults.
+export const DEFAULT_PIPE_TYPES = ['S&S', 'Plain', 'FlushJoint']
+export const DEFAULT_PIPE_CLASSES = ['NP3', 'NP4']
 
-export function categoryTagClass(category) {
-  if (category === 'PILLAR') return 'tag pillar'
-  if (category === 'F.J.') return 'tag fj'
+// Human label for a pipe row, e.g. "150mm S&S NP3".
+export function pipeLabel(p) {
+  if (!p) return '—'
+  return `${p.size_mm}mm ${p.type} ${p.class}`
+}
+
+// Colour badge class for a pipe Type (reuses existing CSS: .tag / .pillar / .fj).
+export function typeTagClass(type) {
+  if (type === 'FlushJoint') return 'tag fj'
+  if (type === 'Plain') return 'tag pillar'
   return 'tag'
 }

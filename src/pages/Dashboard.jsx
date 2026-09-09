@@ -9,6 +9,7 @@ import { fetchAllInRange } from '../lib/fetchAll'
 import { supabase } from '../lib/supabaseClient'
 import { downloadCSV } from '../lib/csv'
 import { buildStandardResolver } from '../lib/cementStandards'
+import { pipeLabel } from '../lib/constants'
 import { rangePreset, shortDate, todayISO } from '../lib/dates'
 
 const RUST = '#b5432e'
@@ -23,7 +24,7 @@ function rate(good, reject) {
 
 export default function Dashboard() {
   const toast = useToast()
-  const { machines, sizes, contractors, loading: mLoading } = useMasters({ activeOnly: false })
+  const { machines, pipes, contractors, loading: mLoading } = useMasters({ activeOnly: false })
 
   const [preset, setPreset] = useState('month')
   const [from, setFrom] = useState(rangePreset('month').from)
@@ -37,7 +38,9 @@ export default function Dashboard() {
 
   // name lookups
   const mName = useMemo(() => Object.fromEntries(machines.map((m) => [m.id, m.name])), [machines])
-  const sName = useMemo(() => Object.fromEntries(sizes.map((s) => [s.id, s.label])), [sizes])
+  const pName = useMemo(() => Object.fromEntries(pipes.map((p) => [p.id, pipeLabel(p)])), [pipes])
+  // pipe_id -> { size_mm, class, type } for reconciliation + CSV columns
+  const pMeta = useMemo(() => Object.fromEntries(pipes.map((p) => [p.id, p])), [pipes])
   const cName = useMemo(() => Object.fromEntries(contractors.map((c) => [c.id, c.name])), [contractors])
 
   function applyPreset(p) {
@@ -91,18 +94,18 @@ export default function Dashboard() {
   // ---- aggregations --------------------------------------------------------
   const agg = useMemo(() => {
     let totalGood = 0, totalReject = 0
-    const bySize = {}       // sizeId -> {good, reject}
+    const byPipe = {}       // pipeId -> {good, reject}
     const byMachine = {}    // machineId -> {good, reject}
     const trend = {}        // date -> {good, reject}
-    const byContractor = {} // cid -> {good, reject, days:Set, sizes:Set, machines:Set, bySize:{sizeId:{good,reject}}}
+    const byContractor = {} // cid -> {good, reject, days:Set, pipes:Set, machines:Set, byPipe:{pipeId:{good,reject}}}
 
     for (const r of prod) {
       const g = r.good_qty || 0
       const rj = r.reject_qty || 0
       totalGood += g; totalReject += rj
 
-      ;(bySize[r.pipe_size_id] ||= { good: 0, reject: 0 })
-      bySize[r.pipe_size_id].good += g; bySize[r.pipe_size_id].reject += rj
+      ;(byPipe[r.pipe_id] ||= { good: 0, reject: 0 })
+      byPipe[r.pipe_id].good += g; byPipe[r.pipe_id].reject += rj
 
       ;(byMachine[r.machine_id] ||= { good: 0, reject: 0 })
       byMachine[r.machine_id].good += g; byMachine[r.machine_id].reject += rj
@@ -111,12 +114,12 @@ export default function Dashboard() {
       trend[r.date].good += g; trend[r.date].reject += rj
 
       const c = (byContractor[r.contractor_id] ||= {
-        good: 0, reject: 0, days: new Set(), sizes: new Set(), machines: new Set(), bySize: {},
+        good: 0, reject: 0, days: new Set(), pipes: new Set(), machines: new Set(), byPipe: {},
       })
       c.good += g; c.reject += rj
-      c.days.add(r.date); c.sizes.add(r.pipe_size_id); c.machines.add(r.machine_id)
-      ;(c.bySize[r.pipe_size_id] ||= { good: 0, reject: 0 })
-      c.bySize[r.pipe_size_id].good += g; c.bySize[r.pipe_size_id].reject += rj
+      c.days.add(r.date); c.pipes.add(r.pipe_id); c.machines.add(r.machine_id)
+      ;(c.byPipe[r.pipe_id] ||= { good: 0, reject: 0 })
+      c.byPipe[r.pipe_id].good += g; c.byPipe[r.pipe_id].reject += rj
     }
 
     // fuel
@@ -130,16 +133,16 @@ export default function Dashboard() {
       fuelTrend[r.date][r.fuel_type] += consumed
     }
 
-    return { totalGood, totalReject, bySize, byMachine, trend, byContractor, totalCement, totalDiesel, fuelTrend }
+    return { totalGood, totalReject, byPipe, byMachine, trend, byContractor, totalCement, totalDiesel, fuelTrend }
   }, [prod, fuel])
 
   // chart datasets ------------------------------------------------------------
-  const sizeChart = useMemo(
+  const pipeChart = useMemo(
     () =>
-      Object.entries(agg.bySize)
-        .map(([id, v]) => ({ name: sName[id] || '—', good: v.good, reject: v.reject, rejectRate: rate(v.good, v.reject) }))
+      Object.entries(agg.byPipe)
+        .map(([id, v]) => ({ name: pName[id] || '—', good: v.good, reject: v.reject, rejectRate: rate(v.good, v.reject) }))
         .sort((a, b) => b.good - a.good),
-    [agg, sName]
+    [agg, pName]
   )
 
   const machineChart = useMemo(
@@ -176,9 +179,9 @@ export default function Dashboard() {
       total: v.good + v.reject,
       rejectRate: rate(v.good, v.reject),
       days: v.days.size,
-      sizes: v.sizes.size,
+      pipeCount: v.pipes.size,
       machines: v.machines.size,
-      bySize: v.bySize,
+      byPipe: v.byPipe,
     }))
     const avg = rows.length ? rows.reduce((s, r) => s + r.rejectRate, 0) / rows.length : 0
     rows.forEach((r) => (r.aboveAvg = r.rejectRate > avg && rows.length > 1))
@@ -201,13 +204,19 @@ export default function Dashboard() {
 
     const cementLogs = fuel.filter((r) => r.fuel_type === 'cement')
     const machMatch = (mid) => !reconMachine || mid === reconMachine
+    // expected bags for one production row, via its pipe's size + class
+    const expectedFor = (r) => {
+      const p = pMeta[r.pipe_id]
+      if (!p) return 0
+      return (r.good_qty || 0) * resolve(p.size_mm, p.class, r.date)
+    }
 
     // ----- headline totals (respect both optional filters) -----
     let expected = 0
     for (const r of prod) {
       if (!machMatch(r.machine_id)) continue
       if (reconContractor && r.contractor_id !== reconContractor) continue
-      expected += (r.good_qty || 0) * resolve(r.pipe_size_id, r.date)
+      expected += expectedFor(r)
     }
 
     let actual = 0
@@ -231,7 +240,7 @@ export default function Dashboard() {
       for (const r of prod) {
         if (!machMatch(r.machine_id)) continue
         if (r.contractor_id !== cid) continue
-        exp += (r.good_qty || 0) * resolve(r.pipe_size_id, r.date)
+        exp += expectedFor(r)
       }
       let assoc = 0
       for (const log of cementLogs) {
@@ -254,7 +263,7 @@ export default function Dashboard() {
       difference: +(actual - expected).toFixed(2),
       rows,
     }
-  }, [prod, fuel, standards, links, reconMachine, reconContractor, cName])
+  }, [prod, fuel, standards, links, reconMachine, reconContractor, cName, pMeta])
 
   function exportReconciliation() {
     const rows = recon.rows.map((r) => ({
@@ -273,17 +282,24 @@ export default function Dashboard() {
 
   // ---- CSV exports ---------------------------------------------------------
   function exportProduction() {
-    const rows = prod.map((r) => ({
-      date: r.date,
-      size: sName[r.pipe_size_id] || r.pipe_size_id,
-      machine: mName[r.machine_id] || r.machine_id,
-      contractor: cName[r.contractor_id] || r.contractor_id,
-      good_qty: r.good_qty,
-      reject_qty: r.reject_qty,
-    }))
+    const rows = prod.map((r) => {
+      const p = pMeta[r.pipe_id] || {}
+      return {
+        date: r.date,
+        size_mm: p.size_mm ?? '',
+        type: p.type ?? '',
+        klass: p.class ?? '',
+        machine: mName[r.machine_id] || r.machine_id,
+        contractor: cName[r.contractor_id] || r.contractor_id,
+        good_qty: r.good_qty,
+        reject_qty: r.reject_qty,
+      }
+    })
     downloadCSV(`production_${from}_to_${to}.csv`, rows, [
       { key: 'date', header: 'Date' },
-      { key: 'size', header: 'Pipe Size' },
+      { key: 'size_mm', header: 'Size (mm)' },
+      { key: 'type', header: 'Type' },
+      { key: 'klass', header: 'Class' },
       { key: 'machine', header: 'Machine' },
       { key: 'contractor', header: 'Contractor' },
       { key: 'good_qty', header: 'Good Qty' },
@@ -294,7 +310,7 @@ export default function Dashboard() {
   function exportContractors() {
     const rows = contractorRows.rows.map((r) => ({
       contractor: r.name, good: r.good, reject: r.reject, total: r.total,
-      rejectRate: r.rejectRate, days: r.days, sizes: r.sizes, machines: r.machines,
+      rejectRate: r.rejectRate, days: r.days, pipeCount: r.pipeCount, machines: r.machines,
     }))
     downloadCSV(`contractors_${from}_to_${to}.csv`, rows, [
       { key: 'contractor', header: 'Contractor' },
@@ -303,7 +319,7 @@ export default function Dashboard() {
       { key: 'total', header: 'Total made' },
       { key: 'rejectRate', header: 'Reject %' },
       { key: 'days', header: 'Days worked' },
-      { key: 'sizes', header: 'Distinct sizes' },
+      { key: 'pipeCount', header: 'Distinct pipes' },
       { key: 'machines', header: 'Distinct machines' },
     ])
   }
@@ -364,9 +380,9 @@ export default function Dashboard() {
             <div className="empty">No production in this range.</div>
           ) : (
             <>
-              <h3>Total production by size</h3>
+              <h3>Total production by pipe</h3>
               <ChartBox>
-                <BarChart data={sizeChart} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
+                <BarChart data={pipeChart} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#d8d2c4" />
                   <XAxis dataKey="name" tick={{ fontSize: 11 }} interval={0} angle={-35} textAnchor="end" height={54} />
                   <YAxis tick={{ fontSize: 11 }} />
@@ -392,8 +408,8 @@ export default function Dashboard() {
               </ChartBox>
 
               <hr className="divider" />
-              <h3>Reject rate % by size</h3>
-              <RateTable rows={sizeChart} labelHead="Size" />
+              <h3>Reject rate % by pipe</h3>
+              <RateTable rows={pipeChart} labelHead="Pipe" />
 
               <hr className="divider" />
               <h3>Reject rate % by machine</h3>
@@ -428,7 +444,7 @@ export default function Dashboard() {
                       <th className="num">Reject</th>
                       <th className="num">Reject %</th>
                       <th className="num">Days</th>
-                      <th className="num">Sizes</th>
+                      <th className="num">Pipes</th>
                       <th className="num">Machines</th>
                       <th></th>
                     </tr>
@@ -443,7 +459,7 @@ export default function Dashboard() {
                           {r.rejectRate}% {r.aboveAvg && <span className="pill-warn">HIGH</span>}
                         </td>
                         <td className="num">{r.days}</td>
-                        <td className="num">{r.sizes}</td>
+                        <td className="num">{r.pipeCount}</td>
                         <td className="num">{r.machines}</td>
                         <td className="center">
                           <button className="btn sm ghost" onClick={() => setSelectedContractor(r)}>View</button>
@@ -568,7 +584,7 @@ export default function Dashboard() {
       {selectedContractor && (
         <ContractorDetail
           row={selectedContractor}
-          sName={sName}
+          pName={pName}
           onClose={() => setSelectedContractor(null)}
         />
       )}
@@ -624,9 +640,9 @@ function RateTable({ rows, labelHead }) {
 }
 
 // Per-contractor detail modal-ish panel.
-function ContractorDetail({ row, sName, onClose }) {
-  const sizeRows = Object.entries(row.bySize)
-    .map(([id, v]) => ({ size: sName[id] || '—', good: v.good, reject: v.reject, rate: rate(v.good, v.reject) }))
+function ContractorDetail({ row, pName, onClose }) {
+  const pipeRows = Object.entries(row.byPipe)
+    .map(([id, v]) => ({ pipe: pName[id] || '—', good: v.good, reject: v.reject, rate: rate(v.good, v.reject) }))
     .sort((a, b) => b.good - a.good)
   return (
     <div className="toast" style={{ position: 'fixed', inset: 'auto 10px 10px 10px', left: '50%', transform: 'translateX(-50%)', maxWidth: 560, width: '92vw', background: '#f6f5f1', color: '#1f2420', borderLeftColor: RUST, padding: 0 }}>
@@ -641,10 +657,10 @@ function ContractorDetail({ row, sName, onClose }) {
             <Stat k="Good" v={row.good.toLocaleString()} />
             <Stat k="Reject" v={row.reject.toLocaleString()} sub={`${row.rejectRate}%`} />
             <Stat k="Days worked" v={row.days} />
-            <Stat k="Sizes / Machines" v={`${row.sizes} / ${row.machines}`} />
+            <Stat k="Pipes / Machines" v={`${row.pipeCount} / ${row.machines}`} />
           </div>
-          <h3>By size</h3>
-          <RateTable rows={sizeRows.map((s) => ({ name: s.size, good: s.good, reject: s.reject, rejectRate: s.rate }))} labelHead="Size" />
+          <h3>By pipe</h3>
+          <RateTable rows={pipeRows.map((p) => ({ name: p.pipe, good: p.good, reject: p.reject, rejectRate: p.rate }))} labelHead="Pipe" />
         </div>
       </div>
     </div>

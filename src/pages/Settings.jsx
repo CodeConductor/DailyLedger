@@ -2,21 +2,28 @@ import { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import { useMasters } from '../lib/useMasters'
 import { useToast } from '../components/Toast'
-import { CATEGORIES, DEFAULT_ORG_ID, categoryTagClass } from '../lib/constants'
+import {
+  DEFAULT_ORG_ID,
+  DEFAULT_PIPE_TYPES,
+  DEFAULT_PIPE_CLASSES,
+  pipeLabel,
+  typeTagClass,
+} from '../lib/constants'
 import { buildStandardResolver } from '../lib/cementStandards'
 import { todayISO } from '../lib/dates'
 
 export default function Settings() {
   const toast = useToast()
-  const { machines, sizes, contractors, settings, loading, reload } = useMasters({ activeOnly: false })
+  const { machines, pipes, contractors, settings, loading, reload } = useMasters({ activeOnly: false })
 
   if (loading) return <div className="loading">Loading…</div>
 
   return (
     <div>
       <MachineSettings machines={machines} reload={reload} toast={toast} />
-      <SizeSettings sizes={sizes} reload={reload} toast={toast} />
-      <CementStandardSettings sizes={sizes} toast={toast} />
+      <TypeClassSettings settings={settings} reload={reload} toast={toast} />
+      <PipeSettings pipes={pipes} settings={settings} reload={reload} toast={toast} />
+      <CementStandardSettings pipes={pipes} toast={toast} />
       <ContractorSettings contractors={contractors} reload={reload} toast={toast} />
       <RawMaterialSettings settings={settings} reload={reload} toast={toast} />
     </div>
@@ -79,75 +86,189 @@ function MachineSettings({ machines, reload, toast }) {
   )
 }
 
-// ---- Pipe sizes -------------------------------------------------------------
-function SizeSettings({ sizes, reload, toast }) {
-  const [label, setLabel] = useState('')
-  const [category, setCategory] = useState('S&S')
+// ---- Type & Class editable lists (stored in app_settings) -------------------
+function TypeClassSettings({ settings, reload, toast }) {
+  const [types, setTypes] = useState([])
+  const [classes, setClasses] = useState([])
+  const [newType, setNewType] = useState('')
+  const [newClass, setNewClass] = useState('')
+  const [saving, setSaving] = useState(false)
 
-  async function add() {
-    const l = label.trim()
-    if (!l) return
-    const maxOrder = sizes.reduce((m, s) => Math.max(m, s.sort_order || 0), 0)
-    const { error } = await supabase.from('pipe_sizes').insert({
-      label: l, category, sort_order: maxOrder + 10, org_id: DEFAULT_ORG_ID,
-    })
-    if (error) return toast(error.message)
-    setLabel('')
-    await reload()
-    toast('Size added', 'ok')
+  useEffect(() => {
+    setTypes(settings?.pipe_types?.length ? settings.pipe_types : DEFAULT_PIPE_TYPES)
+    setClasses(settings?.pipe_classes?.length ? settings.pipe_classes : DEFAULT_PIPE_CLASSES)
+  }, [settings])
+
+  function addTo(list, setList, value, resetter) {
+    const v = value.trim()
+    if (!v) return
+    if (list.includes(v)) return toast('That value already exists.')
+    setList([...list, v])
+    resetter('')
   }
-  async function rename(s) {
-    const n = window.prompt('Rename size label', s.label)
-    if (n == null) return
-    const t = n.trim()
-    if (!t) return
-    const { error } = await supabase.from('pipe_sizes').update({ label: t }).eq('id', s.id)
-    if (error) return toast(error.message)
-    await reload()
+  function removeFrom(list, setList, value) {
+    setList(list.filter((x) => x !== value))
   }
-  async function setCat(s, cat) {
-    const { error } = await supabase.from('pipe_sizes').update({ category: cat }).eq('id', s.id)
+
+  async function save() {
+    setSaving(true)
+    const { error } = await supabase
+      .from('app_settings')
+      .update({ pipe_types: types, pipe_classes: classes })
+      .eq('org_id', DEFAULT_ORG_ID)
+    setSaving(false)
     if (error) return toast(error.message)
     await reload()
-  }
-  async function toggle(s) {
-    const { error } = await supabase.from('pipe_sizes').update({ active: !s.active }).eq('id', s.id)
-    if (error) return toast(error.message)
-    await reload()
+    toast('Type & Class lists saved', 'ok')
   }
 
   return (
     <div className="panel">
-      <div className="panel-head">Pipe Sizes / Categories · पाइप साइज़</div>
+      <div className="panel-head">
+        Pipe Type &amp; Class lists · प्रकार व श्रेणी
+        <span className="spacer" />
+        <button className="btn sm primary" onClick={save} disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+      </div>
       <div className="panel-body">
+        <div className="small muted mb">
+          These lists fill the Type and Class dropdowns when adding a pipe below. Add or remove
+          values as needed, then press <strong>Save</strong>. Removing a value here does not affect
+          pipes already created with it.
+        </div>
+        <div className="row">
+          <div className="field">
+            <label>Types</label>
+            <div className="flex wrap mb">
+              {types.map((t) => (
+                <span className="chip" key={t}>
+                  {t} <span className="x" onClick={() => removeFrom(types, setTypes, t)}>✕</span>
+                </span>
+              ))}
+            </div>
+            <div className="flex wrap">
+              <input placeholder="e.g. Plain" style={{ maxWidth: 180 }}
+                value={newType} onChange={(e) => setNewType(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addTo(types, setTypes, newType, setNewType))} />
+              <button className="btn" onClick={() => addTo(types, setTypes, newType, setNewType)}>+ Add type</button>
+            </div>
+          </div>
+          <div className="field">
+            <label>Classes</label>
+            <div className="flex wrap mb">
+              {classes.map((c) => (
+                <span className="chip" key={c}>
+                  {c} <span className="x" onClick={() => removeFrom(classes, setClasses, c)}>✕</span>
+                </span>
+              ))}
+            </div>
+            <div className="flex wrap">
+              <input placeholder="e.g. NP2" style={{ maxWidth: 180 }}
+                value={newClass} onChange={(e) => setNewClass(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), addTo(classes, setClasses, newClass, setNewClass))} />
+              <button className="btn" onClick={() => addTo(classes, setClasses, newClass, setNewClass)}>+ Add class</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---- Pipes (size + type + class) --------------------------------------------
+function PipeSettings({ pipes, settings, reload, toast }) {
+  const typeOpts = settings?.pipe_types?.length ? settings.pipe_types : DEFAULT_PIPE_TYPES
+  const classOpts = settings?.pipe_classes?.length ? settings.pipe_classes : DEFAULT_PIPE_CLASSES
+
+  const [sizeMm, setSizeMm] = useState('')
+  const [type, setType] = useState('')
+  const [klass, setKlass] = useState('')
+
+  // Default the type/class selects to the first available option.
+  useEffect(() => { if (!type && typeOpts.length) setType(typeOpts[0]) }, [typeOpts, type])
+  useEffect(() => { if (!klass && classOpts.length) setKlass(classOpts[0]) }, [classOpts, klass])
+
+  async function add() {
+    const size = parseInt(sizeMm, 10)
+    if (!Number.isInteger(size) || size <= 0) return toast('Enter a valid size in mm.')
+    if (!type || !klass) return toast('Pick a type and a class.')
+    const { error } = await supabase.from('pipes').insert({
+      size_mm: size, type, class: klass, org_id: DEFAULT_ORG_ID,
+    })
+    if (error) {
+      // 23505 = unique violation (this exact size/type/class already exists)
+      return toast(error.code === '23505' ? 'That pipe already exists.' : error.message)
+    }
+    setSizeMm('')
+    await reload()
+    toast('Pipe added', 'ok')
+  }
+  async function toggle(p) {
+    const { error } = await supabase.from('pipes').update({ active: !p.active }).eq('id', p.id)
+    if (error) return toast(error.message)
+    await reload()
+  }
+  async function del(p) {
+    if (!window.confirm(`Delete ${pipeLabel(p)}? This cannot be undone.`)) return
+    const { error } = await supabase.from('pipes').delete().eq('id', p.id)
+    if (error) {
+      // 23503 = FK violation: pipe is referenced by production entries
+      return toast(
+        error.code === '23503'
+          ? 'This pipe is used in production entries — archive it instead of deleting.'
+          : error.message
+      )
+    }
+    await reload()
+    toast('Pipe deleted', 'ok')
+  }
+
+  return (
+    <div className="panel">
+      <div className="panel-head">Pipes · पाइप (Size · Type · Class)</div>
+      <div className="panel-body">
+        <div className="small muted mb">
+          A pipe is one full spec: Size (mm) + Type + Class. Add the ones you make; archive pipes
+          you no longer run (kept for old reports), or delete an unused one outright.
+        </div>
         <div className="flex wrap mb">
-          <input placeholder="e.g. 1200/3" style={{ maxWidth: 160 }}
-            value={label} onChange={(e) => setLabel(e.target.value)}
+          <input type="number" min="1" step="1" inputMode="numeric" placeholder="Size mm (e.g. 150)"
+            style={{ maxWidth: 160 }} value={sizeMm} onChange={(e) => setSizeMm(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), add())} />
-          <select style={{ maxWidth: 140 }} value={category} onChange={(e) => setCategory(e.target.value)}>
-            {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+          <select style={{ maxWidth: 150 }} value={type} onChange={(e) => setType(e.target.value)}>
+            {typeOpts.map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          <select style={{ maxWidth: 130 }} value={klass} onChange={(e) => setKlass(e.target.value)}>
+            {classOpts.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
           <button className="btn" onClick={add}>+ Add</button>
         </div>
-        <ListTable
-          rows={sizes}
-          render={(s) => (
-            <>
-              <td className="rowlabel">
-                {s.label} <span className={categoryTagClass(s.category)}>{s.category}</span>
-              </td>
-              <td>
-                <select value={s.category} onChange={(e) => setCat(s, e.target.value)} style={{ maxWidth: 130 }}>
-                  {CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </td>
-              <td className="center">
-                <button className="btn sm ghost" onClick={() => rename(s)}>Rename</button>{' '}
-                <button className="btn sm ghost" onClick={() => toggle(s)}>{s.active ? 'Archive' : 'Restore'}</button>
-              </td>
-            </>
-          )}
-        />
+        {pipes.length === 0 ? (
+          <div className="empty">No pipes yet — add one above.</div>
+        ) : (
+          <div className="grid-wrap">
+            <table className="register">
+              <thead>
+                <tr><th>Pipe</th><th>Status</th><th className="center">Actions</th></tr>
+              </thead>
+              <tbody>
+                {pipes.map((p) => (
+                  <tr key={p.id}>
+                    <td className="rowlabel">
+                      {p.size_mm}mm{' '}
+                      <span className={typeTagClass(p.type)}>{p.type}</span>{' '}
+                      <span className="tag">{p.class}</span>
+                    </td>
+                    <td>{p.active ? <span className="ok">Active</span> : <span className="muted">Archived</span>}</td>
+                    <td className="center">
+                      <button className="btn sm ghost" onClick={() => toggle(p)}>{p.active ? 'Archive' : 'Restore'}</button>{' '}
+                      <button className="btn sm ghost" onClick={() => del(p)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -305,16 +426,24 @@ function RawMaterialSettings({ settings, reload, toast }) {
   )
 }
 
-// ---- Cement standards (bags per pipe, effective-dated) ----------------------
-function CementStandardSettings({ sizes, toast }) {
+// ---- Cement standards (bags per pipe, per Size + Class, effective-dated) -----
+function CementStandardSettings({ pipes, toast }) {
   const today = todayISO()
   const [standards, setStandards] = useState([])
-  const [draft, setDraft] = useState({}) // pipe_size_id -> string value
+  const [draft, setDraft] = useState({}) // `${size_mm}|${class}` -> string value
   const [effectiveDate, setEffectiveDate] = useState(today)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
-  const activeSizes = useMemo(() => sizes.filter((s) => s.active), [sizes])
+  // Distinct (size_mm, class) combinations from active pipes — type is ignored.
+  const combos = useMemo(() => {
+    const seen = new Map()
+    for (const p of pipes.filter((x) => x.active)) {
+      const key = `${p.size_mm}|${p.class}`
+      if (!seen.has(key)) seen.set(key, { key, size_mm: p.size_mm, class: p.class })
+    }
+    return [...seen.values()].sort((a, b) => a.size_mm - b.size_mm || (a.class < b.class ? -1 : 1))
+  }, [pipes])
 
   async function load() {
     setLoading(true)
@@ -328,39 +457,39 @@ function CementStandardSettings({ sizes, toast }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Value currently in effect (today) per size — this is what we edit against.
   const resolver = useMemo(() => buildStandardResolver(standards), [standards])
-  const currentBySize = useMemo(() => {
+  const currentByCombo = useMemo(() => {
     const m = {}
-    for (const s of activeSizes) m[s.id] = resolver(s.id, today)
+    for (const c of combos) m[c.key] = resolver(c.size_mm, c.class, today)
     return m
-  }, [activeSizes, resolver, today])
+  }, [combos, resolver, today])
 
   // Initialise the draft from the current values whenever they change.
   useEffect(() => {
     const d = {}
-    for (const s of activeSizes) d[s.id] = String(currentBySize[s.id] ?? 0)
+    for (const c of combos) d[c.key] = String(currentByCombo[c.key] ?? 0)
     setDraft(d)
-  }, [activeSizes, currentBySize])
+  }, [combos, currentByCombo])
 
-  function setVal(id, v) {
-    setDraft((prev) => ({ ...prev, [id]: v }))
+  function setVal(key, v) {
+    setDraft((prev) => ({ ...prev, [key]: v }))
   }
 
   async function save() {
-    // Only insert new rows for sizes whose value actually changed — each insert
+    // Only insert new rows for combos whose value actually changed — each insert
     // is a new effective-dated version (history preserved, past reports intact).
-    const changed = activeSizes.filter((s) => {
-      const cur = Number(currentBySize[s.id] ?? 0)
-      const next = Number(draft[s.id])
+    const changed = combos.filter((c) => {
+      const cur = Number(currentByCombo[c.key] ?? 0)
+      const next = Number(draft[c.key])
       return !Number.isNaN(next) && next >= 0 && next !== cur
     })
     if (!changed.length) return toast('No changes to save.')
     setSaving(true)
-    const rows = changed.map((s) => ({
+    const rows = changed.map((c) => ({
       org_id: DEFAULT_ORG_ID,
-      pipe_size_id: s.id,
-      bags_per_pipe: Number(draft[s.id]),
+      size_mm: c.size_mm,
+      class: c.class,
+      bags_per_pipe: Number(draft[c.key]),
       effective_date: effectiveDate,
     }))
     const { error } = await supabase.from('cement_standards').insert(rows)
@@ -381,10 +510,10 @@ function CementStandardSettings({ sizes, toast }) {
       </div>
       <div className="panel-body">
         <div className="small muted mb">
-          Enter your plant's own standard cement usage per pipe for each size. Used to
-          calculate expected cement consumption for reconciliation reports. There is no
-          universal figure — it depends on your mix design and pipe wall volume, so get
-          these from your QC / mix-design staff.
+          Enter your plant's own standard cement usage per pipe, per Size + Class (Type is not used
+          — cement depends on bore and strength class). Used to calculate expected cement for
+          reconciliation reports. There is no universal figure — get these from your QC / mix-design
+          staff.
         </div>
         <div className="row mb">
           <div className="field" style={{ maxWidth: 220 }}>
@@ -397,35 +526,35 @@ function CementStandardSettings({ sizes, toast }) {
         </div>
         {loading ? (
           <div className="loading">Loading…</div>
-        ) : activeSizes.length === 0 ? (
-          <div className="empty">Add pipe sizes first.</div>
+        ) : combos.length === 0 ? (
+          <div className="empty">Add pipes first — standards are listed per size + class.</div>
         ) : (
           <div className="grid-wrap">
             <table className="register">
               <thead>
                 <tr>
-                  <th>Pipe Size</th>
+                  <th>Size · Class</th>
                   <th className="num">Currently effective (bags/pipe)</th>
                   <th className="num">New value (bags/pipe)</th>
                 </tr>
               </thead>
               <tbody>
-                {activeSizes.map((s) => {
-                  const cur = Number(currentBySize[s.id] ?? 0)
-                  const changed = Number(draft[s.id]) !== cur && draft[s.id] !== undefined
+                {combos.map((c) => {
+                  const cur = Number(currentByCombo[c.key] ?? 0)
+                  const changed = Number(draft[c.key]) !== cur && draft[c.key] !== undefined
                   return (
-                    <tr key={s.id}>
+                    <tr key={c.key}>
                       <td className="rowlabel">
-                        {s.label} <span className={categoryTagClass(s.category)}>{s.category}</span>
+                        {c.size_mm}mm <span className="tag">{c.class}</span>
                       </td>
                       <td className="num">{cur}</td>
                       <td className="num">
                         <input
                           type="number" min="0" step="0.0001" inputMode="decimal"
-                          aria-invalid={Number(draft[s.id]) < 0}
+                          aria-invalid={Number(draft[c.key]) < 0}
                           style={changed ? { borderColor: 'var(--rust)' } : undefined}
-                          value={draft[s.id] ?? ''}
-                          onChange={(e) => setVal(s.id, e.target.value)}
+                          value={draft[c.key] ?? ''}
+                          onChange={(e) => setVal(c.key, e.target.value)}
                         />
                       </td>
                     </tr>
@@ -447,7 +576,7 @@ function ListTable({ rows, render }) {
     <div className="grid-wrap">
       <table className="register">
         <thead>
-          <tr><th>Name</th><th>Status / Category</th><th className="center">Actions</th></tr>
+          <tr><th>Name</th><th>Status</th><th className="center">Actions</th></tr>
         </thead>
         <tbody>
           {rows.map((r) => <tr key={r.id}>{render(r)}</tr>)}
